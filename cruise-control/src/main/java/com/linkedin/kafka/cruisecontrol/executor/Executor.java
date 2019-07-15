@@ -32,7 +32,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import kafka.zk.KafkaZkClient;
-import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.Node;
@@ -166,10 +165,7 @@ public class Executor {
                                  dropwizardMetricRegistry,
                                  time);
     _metadataClient = metadataClient != null ? metadataClient
-                                             : new MetadataClient(config,
-                                                                  new Metadata(METADATA_REFRESH_BACKOFF, METADATA_EXPIRY_MS, false),
-                                                                  -1L,
-                                                                  time);
+                                             : new MetadataClient(config, -1L, time);
     _statusCheckingIntervalMs = config.getLong(KafkaCruiseControlConfig.EXECUTION_PROGRESS_CHECK_INTERVAL_MS_CONFIG);
     _proposalExecutor =
         Executors.newSingleThreadExecutor(new KafkaCruiseControlThreadFactory("ProposalExecutor", false, LOG));

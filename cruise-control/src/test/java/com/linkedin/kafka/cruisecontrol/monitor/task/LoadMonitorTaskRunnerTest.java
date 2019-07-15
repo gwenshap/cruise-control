@@ -31,13 +31,12 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.TimeUnit;
 import kafka.admin.RackAwareMode;
 import kafka.zk.AdminZkClient;
 import kafka.zk.KafkaZkClient;
-import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.common.utils.Time;
 import org.easymock.EasyMock;
 import org.junit.After;
@@ -88,10 +87,9 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
   @Test
   public void testSimpleFetch() throws InterruptedException {
     KafkaCruiseControlConfig config = new KafkaCruiseControlConfig(getLoadMonitorProperties());
-    Metadata metadata = new Metadata(10, 10, false);
-    MetadataClient metadataClient = new MetadataClient(config, metadata, -1L, TIME);
+    MetadataClient metadataClient = new MetadataClient(config, -1L, TIME);
     MockPartitionMetricSampleAggregator mockPartitionMetricSampleAggregator =
-        new MockPartitionMetricSampleAggregator(config, metadata);
+        new MockPartitionMetricSampleAggregator(config, metadataClient.cluster());
     KafkaBrokerMetricSampleAggregator mockBrokerMetricSampleAggregator =
         EasyMock.mock(KafkaBrokerMetricSampleAggregator.class);
     List<MetricSampler> samplers = new ArrayList<>();
@@ -105,7 +103,7 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
     LoadMonitorTaskRunner loadMonitorTaskRunner =
         new LoadMonitorTaskRunner(config, fetcherManager, mockPartitionMetricSampleAggregator,
                                   mockBrokerMetricSampleAggregator, metadataClient, TIME);
-    while (metadata.fetch().topics().size() < NUM_TOPICS) {
+    while (metadataClient.cluster().topics().size() < NUM_TOPICS) {
       Thread.sleep(10);
       metadataClient.refreshMetadata();
     }
@@ -137,10 +135,9 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
   @Test
   public void testSamplingError() {
     KafkaCruiseControlConfig config = new KafkaCruiseControlConfig(getLoadMonitorProperties());
-    Metadata metadata = new Metadata(10, 10, false);
-    MetadataClient metadataClient = new MetadataClient(config, metadata, -1L, TIME);
+    MetadataClient metadataClient = new MetadataClient(config, -1L, TIME);
     MockPartitionMetricSampleAggregator mockMetricSampleAggregator =
-        new MockPartitionMetricSampleAggregator(config, metadata);
+        new MockPartitionMetricSampleAggregator(config, metadataClient.cluster());
     KafkaBrokerMetricSampleAggregator mockBrokerMetricSampleAggregator =
         EasyMock.mock(KafkaBrokerMetricSampleAggregator.class);
     List<MetricSampler> samplers = new ArrayList<>();
@@ -154,7 +151,7 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
     LoadMonitorTaskRunner loadMonitorTaskRunner =
         new LoadMonitorTaskRunner(config, fetcherManager, mockMetricSampleAggregator, mockBrokerMetricSampleAggregator,
                                   metadataClient, TIME);
-    while (metadata.fetch().topics().size() < 100) {
+    while (metadataClient.cluster().topics().size() < 100) {
       metadataClient.refreshMetadata();
     }
     loadMonitorTaskRunner.start(true);
@@ -242,52 +239,15 @@ public class LoadMonitorTaskRunnerTest extends CCKafkaIntegrationTestHarness {
     }
   }
 
-  /**
-   * A clock that you can manually advance by calling sleep.
-   */
-  private static class MockTime implements Time {
-
-    private long _nanos = 0;
-    private long _autoTickMs = 0;
-
-    public MockTime(long autoTickMs) {
-      _nanos = 0;
-      _autoTickMs = autoTickMs;
-    }
-
-    @Override
-    public long milliseconds() {
-      this.sleep(_autoTickMs);
-      return TimeUnit.MILLISECONDS.convert(this._nanos, TimeUnit.NANOSECONDS);
-    }
-
-    @Override
-    public long hiResClockMs() {
-      return 0;
-    }
-
-    @Override
-    public long nanoseconds() {
-      this.sleep(_autoTickMs);
-      return _nanos;
-    }
-
-    @Override
-    public void sleep(long ms) {
-      this._nanos += TimeUnit.NANOSECONDS.convert(ms, TimeUnit.MILLISECONDS);
-    }
-
-  }
-
   private static class MockPartitionMetricSampleAggregator extends KafkaPartitionMetricSampleAggregator {
     private final BlockingQueue<PartitionMetricSample> _partitionMetricSamples;
     /**
      * Construct the metric sample aggregator.
      * @param config   The load monitor configurations.
-     * @param metadata The metadata of the cluster.
+     * @param cluster The metadata of the cluster.
      */
-    MockPartitionMetricSampleAggregator(KafkaCruiseControlConfig config, Metadata metadata) {
-      super(config, metadata);
+    MockPartitionMetricSampleAggregator(KafkaCruiseControlConfig config, Cluster cluster) {
+      super(config, cluster);
       _partitionMetricSamples = new ArrayBlockingQueue<>(10000);
     }
 

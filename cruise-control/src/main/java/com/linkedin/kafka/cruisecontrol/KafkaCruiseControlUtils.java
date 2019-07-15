@@ -37,6 +37,7 @@ import org.apache.kafka.common.config.SslConfigs;
 import org.apache.kafka.common.config.SaslConfigs;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.SystemTime;
+import scala.Option;
 
 
 /**
@@ -55,6 +56,7 @@ public class KafkaCruiseControlUtils {
       Collections.unmodifiableSet(new HashSet<>(Arrays.asList(KafkaAssignerEvenRackAwareGoal.class.getSimpleName(),
                                                               KafkaAssignerDiskUsageDistributionGoal.class.getSimpleName())));
   public static final String OPERATION_LOGGER = "operationLogger";
+  public static final String ZK_CLIENT_NAME = "Cruise Control ZK Client";
 
   private KafkaCruiseControlUtils() {
 
@@ -161,13 +163,13 @@ public class KafkaCruiseControlUtils {
    *
    * @param connectString Comma separated host:port pairs, each corresponding to a zk server
    * @param metricGroup Metric group
-   * @param metricType Metric type
+   * @param metricType Metric typex
    * @param zkSecurityEnabled True if zkSecurityEnabled, false otherwise.
    * @return A new instance of KafkaZkClient
    */
   public static KafkaZkClient createKafkaZkClient(String connectString, String metricGroup, String metricType, boolean zkSecurityEnabled) {
     return KafkaZkClient.apply(connectString, zkSecurityEnabled, ZK_SESSION_TIMEOUT, ZK_CONNECTION_TIMEOUT, Integer.MAX_VALUE,
-        new SystemTime(), metricGroup, metricType);
+        new SystemTime(), metricGroup, metricType, Option.apply(ZK_CLIENT_NAME));
   }
 
   /**

@@ -4,7 +4,6 @@
 
 package com.linkedin.kafka.cruisecontrol.monitor.sampling;
 
-import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
@@ -54,11 +53,9 @@ public class DefaultMetricSamplerPartitionAssignorTest {
       }
     }
     Cluster cluster = new Cluster("cluster", allNodes, partitions, Collections.emptySet(), Collections.emptySet());
-    Metadata metadata = new Metadata(10, 10, false);
-    metadata.update(cluster, Collections.emptySet(), 0);
 
     MetricSamplerPartitionAssignor assignor = new DefaultMetricSamplerPartitionAssignor();
-    List<Set<TopicPartition>> assignments = assignor.assignPartitions(metadata.fetch(), NUM_FETCHERS);
+    List<Set<TopicPartition>> assignments = assignor.assignPartitions(cluster, NUM_FETCHERS);
 
     int maxAssignedNumPartitionsForFetcher = -1;
     int minAssignedNumPartitionsForFetcher = Integer.MAX_VALUE;

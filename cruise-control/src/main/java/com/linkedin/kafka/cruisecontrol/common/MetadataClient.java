@@ -6,17 +6,23 @@ package com.linkedin.kafka.cruisecontrol.common;
 
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.monitor.MonitorUtils;
-import java.net.InetSocketAddress;
+
+import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.apache.kafka.clients.ApiVersions;
-import org.apache.kafka.clients.ClientUtils;
-import org.apache.kafka.clients.Metadata;
-import org.apache.kafka.clients.NetworkClient;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.common.Cluster;
-import org.apache.kafka.common.metrics.Metrics;
-import org.apache.kafka.common.network.ChannelBuilder;
+import org.apache.kafka.common.Node;
+import org.apache.kafka.common.PartitionInfo;
+import org.apache.kafka.common.TopicPartitionInfo;
 import org.apache.kafka.common.utils.Time;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,48 +30,25 @@ import org.slf4j.LoggerFactory;
 
 public class MetadataClient {
   private static final Logger LOG = LoggerFactory.getLogger(MetadataClient.class);
-  private static final int DEFAULT_MAX_IN_FLIGHT_REQUEST = 1;
   private final AtomicInteger _metadataGeneration;
-  private final Metadata _metadata;
-  private final NetworkClient _networkClient;
   private final Time _time;
   private final long _metadataTTL;
   private final long _refreshMetadataTimeout;
+  private long _lastUpdateTime = 0;
+  private Cluster _clusterCache;
+  private AdminClient _adminClient;
 
+
+//TODO: Unit tests
   public MetadataClient(KafkaCruiseControlConfig config,
-                        Metadata metadata,
                         long metadataTTL,
                         Time time) {
     _metadataGeneration = new AtomicInteger(0);
-    _metadata = metadata;
     _refreshMetadataTimeout = config.getLong(KafkaCruiseControlConfig.METADATA_MAX_AGE_CONFIG);
     _time = time;
-    List<InetSocketAddress> addresses =
-        ClientUtils.parseAndValidateAddresses(config.getList(KafkaCruiseControlConfig.BOOTSTRAP_SERVERS_CONFIG));
-    _metadata.update(Cluster.bootstrap(addresses), Collections.emptySet(), time.milliseconds());
-    ChannelBuilder channelBuilder = ClientUtils.createChannelBuilder(config);
-    NetworkClientProvider provider = config.getConfiguredInstance(KafkaCruiseControlConfig.NETWORK_CLIENT_PROVIDER_CLASS_CONFIG,
-                                                                  NetworkClientProvider.class);
-
-    _networkClient = provider.createNetworkClient(config.getLong(KafkaCruiseControlConfig.CONNECTIONS_MAX_IDLE_MS_CONFIG),
-                                                  new Metrics(),
-                                                  time,
-                                                  "load-monitor",
-                                                  channelBuilder,
-                                                  _metadata,
-                                                  config.getString(KafkaCruiseControlConfig.CLIENT_ID_CONFIG),
-                                                  DEFAULT_MAX_IN_FLIGHT_REQUEST,
-                                                  config.getLong(KafkaCruiseControlConfig.RECONNECT_BACKOFF_MS_CONFIG),
-                                                  config.getLong(KafkaCruiseControlConfig.RECONNECT_BACKOFF_MS_CONFIG),
-                                                  config.getInt(KafkaCruiseControlConfig.SEND_BUFFER_CONFIG),
-                                                  config.getInt(KafkaCruiseControlConfig.RECEIVE_BUFFER_CONFIG),
-                                                  config.getInt(KafkaCruiseControlConfig.REQUEST_TIMEOUT_MS_CONFIG),
-                                                  true,
-                                                  new ApiVersions());
+    _adminClient = AdminClient.create(config.originals());
     _metadataTTL = metadataTTL;
-    // This is a super confusing interface in the Metadata. If we don't set this to false, the metadata.update()
-    // will remove all the topics that are not in the metadata interested topics list.
-    _metadata.addListener((cluster, unavailableTopics) -> _metadata.needMetadataForAllTopics(false));
+    _clusterCache = Cluster.empty();
   }
 
   /**
@@ -76,51 +59,55 @@ public class MetadataClient {
   }
 
   /**
-   * Refresh the metadata. The method is synchronized because the network client is not thread safe.
+   * Refresh the metadata.
    */
-  public synchronized ClusterAndGeneration refreshMetadata(long timeout) {
+  public ClusterAndGeneration refreshMetadata(long timeout) {
     // Do not update metadata if the metadata has just been refreshed.
-    if (_time.milliseconds() >= _metadata.lastSuccessfulUpdate() + _metadataTTL) {
+    if (_time.milliseconds() >= _lastUpdateTime + _metadataTTL) {
+      //TODO: We need to make sure this isn't mutated while we are copying
+      Cluster beforeUpdate = copyCluster(_clusterCache);
+
       // Cruise Control always fetch metadata for all the topics.
-      _metadata.needMetadataForAllTopics(true);
-      int version = _metadata.requestUpdate();
-      long remaining = timeout;
-      Cluster beforeUpdate = _metadata.fetch();
-      boolean isMetadataUpdated = _metadata.version() > version;
-      while (!isMetadataUpdated && remaining > 0) {
-        _metadata.requestUpdate();
-        long start = _time.milliseconds();
-        _networkClient.poll(remaining, start);
-        remaining -= (_time.milliseconds() - start);
-        isMetadataUpdated = _metadata.version() > version;
-      }
-      if (isMetadataUpdated) {
+
+      //TODO: Cleanup exception handling
+      //TODO: Do I need to block here?
+      //TODO: I'm blocking with same timeout multiple times
+      try {
+
+        Set<String> topics = _adminClient.listTopics().names().get(timeout, TimeUnit.MILLISECONDS);
+        Collection<Node> nodes = _adminClient.describeCluster().nodes().get(timeout,
+                TimeUnit.MILLISECONDS);
+        Map<String, TopicDescription> describeTopicResult =
+                _adminClient.describeTopics(topics).all().get(timeout, TimeUnit.MILLISECONDS);
+        _clusterCache = topicDescriptionsToCluster(nodes, describeTopicResult);
+
         if (LOG.isDebugEnabled()) {
-          LOG.debug("Updated metadata {}", _metadata.fetch());
+          LOG.debug("Updated metadata {}", _clusterCache);
         }
-        if (MonitorUtils.metadataChanged(beforeUpdate, _metadata.fetch())) {
-          _metadataGeneration.incrementAndGet();
-        }
-      } else {
-        LOG.warn("Failed to update metadata in {}ms. Using old metadata with version {} and last successful update {}.",
-                 timeout, _metadata.version(), _metadata.lastSuccessfulUpdate());
+      } catch (ExecutionException e) {
+        e.printStackTrace();
+      } catch (TimeoutException e) {
+        LOG.warn("Failed to update metadata in {}ms. Using old metadata with last successful update {}.",
+                timeout, _lastUpdateTime);
+      } catch (InterruptedException e) {
+        e.printStackTrace();
+      }
+
+      if (MonitorUtils.metadataChanged(beforeUpdate, _clusterCache)) {
+        _metadataGeneration.incrementAndGet();
       }
     }
-    return new ClusterAndGeneration(_metadata.fetch(), _metadataGeneration.get());
+
+    return new ClusterAndGeneration(_clusterCache, _metadataGeneration.get());
   }
 
   /**
    * Close the metadata client. Synchronized to avoid interrupting the network client during a poll.
    */
   public synchronized void close() {
-    _networkClient.close();
-  }
-
-  /**
-   * Get the metadata maintained by this metadata client.
-   */
-  public Metadata metadata() {
-    return _metadata;
+    if (_adminClient != null) {
+      _adminClient.close();
+    }
   }
 
   /**
@@ -134,7 +121,7 @@ public class MetadataClient {
    * Get the current cluster.
    */
   public Cluster cluster() {
-    return _metadata.fetch();
+    return _clusterCache;
   }
 
   public static class ClusterAndGeneration {
@@ -154,4 +141,37 @@ public class MetadataClient {
       return _generation;
     }
   }
+
+  private Cluster copyCluster(Cluster cluster) {
+    // A bit of a hack, but creating a new Cluster by merging the old one with an empty
+    // partition map is the easiest way to copy a cluster.
+
+    return cluster.withPartitions(Collections.emptyMap());
+
+  }
+
+  //TODO: need renaming
+  private Cluster topicDescriptionsToCluster(Collection<Node> nodes,
+                                             Map<String, TopicDescription> describeTopicResult) {
+    List<PartitionInfo> partitionInfos = new LinkedList<>();
+
+    for (Map.Entry<String, TopicDescription> topicDescription: describeTopicResult.entrySet()) {
+      for (TopicPartitionInfo topicPartitionInfo: topicDescription.getValue().partitions()) {
+        PartitionInfo partitionInfo = new PartitionInfo(topicDescription.getKey(),
+                topicPartitionInfo.partition(),
+                topicPartitionInfo.leader(),
+                topicPartitionInfo.replicas().stream().toArray(Node[]::new),
+                topicPartitionInfo.isr().stream().toArray(Node[]::new));
+      partitionInfos.add(partitionInfo);
+      }
+    }
+    return new Cluster("cached cluster metadata", nodes, partitionInfos, Collections.emptySet(),
+            Collections.emptySet());
+
+  }
 }
+
+
+
+
+

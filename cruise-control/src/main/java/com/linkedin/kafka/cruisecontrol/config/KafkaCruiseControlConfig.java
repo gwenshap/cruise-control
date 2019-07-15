@@ -22,7 +22,6 @@ import com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.TopicReplicaDistributionGoal;
-import com.linkedin.kafka.cruisecontrol.common.KafkaNetworkClientProvider;
 import com.linkedin.kafka.cruisecontrol.executor.ExecutorNoopNotifier;
 import com.linkedin.kafka.cruisecontrol.detector.NoopMetricAnomalyFinder;
 import com.linkedin.kafka.cruisecontrol.detector.notifier.NoopNotifier;
@@ -57,8 +56,6 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
   private static final String DEFAULT_FAILED_BROKERS_ZK_PATH = "/CruiseControlBrokerList";
   // We have to define this so we don't need to move every package to scala src folder.
   private static final String DEFAULT_ANOMALY_NOTIFIER_CLASS = NoopNotifier.class.getName();
-  // We have to define this to support the use of network clients with different Kafka client versions.
-  private static final String DEFAULT_NETWORK_CLIENT_PROVIDER_CLASS = KafkaNetworkClientProvider.class.getName();
   private static final String DEFAULT_EXECUTOR_NOTIFIER_CLASS = ExecutorNoopNotifier.class.getName();
   private static final String DEFAULT_METRIC_ANOMALY_FINDER_CLASS = NoopMetricAnomalyFinder.class.getName();
 
@@ -1367,10 +1364,6 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
                 ConfigDef.Type.CLASS,
                 DEFAULT_ANOMALY_NOTIFIER_CLASS,
                 ConfigDef.Importance.LOW, ANOMALY_NOTIFIER_CLASS_DOC)
-        .define(NETWORK_CLIENT_PROVIDER_CLASS_CONFIG,
-                ConfigDef.Type.CLASS, DEFAULT_NETWORK_CLIENT_PROVIDER_CLASS,
-                ConfigDef.Importance.LOW,
-                NETWORK_CLIENT_PROVIDER_CLASS_DOC)
         .define(EXECUTOR_NOTIFIER_CLASS_CONFIG,
                 ConfigDef.Type.CLASS,
                 DEFAULT_EXECUTOR_NOTIFIER_CLASS,
