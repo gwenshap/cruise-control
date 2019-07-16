@@ -14,16 +14,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.DescribeClusterOptions;
+import org.apache.kafka.clients.admin.DescribeTopicsOptions;
+import org.apache.kafka.clients.admin.ListTopicsOptions;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartitionInfo;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,45 +54,54 @@ public class MetadataClient {
   }
 
   /**
-   * Refresh the metadata. The method is synchronized because the network client is not thread safe.
+   * Refresh the metadata.
    */
-  public synchronized ClusterAndGeneration refreshMetadata() {
+  public ClusterAndGeneration refreshMetadata() {
     return refreshMetadata(_refreshMetadataTimeout);
   }
 
   /**
-   * Refresh the metadata.
+   * Refresh the metadata. Synchronized to prevent concurrent updates to our metadata cache
    */
-  public ClusterAndGeneration refreshMetadata(long timeout) {
+  public synchronized ClusterAndGeneration refreshMetadata(long timeout) {
     // Do not update metadata if the metadata has just been refreshed.
     if (_time.milliseconds() >= _lastUpdateTime + _metadataTTL) {
-      //TODO: We need to make sure this isn't mutated while we are copying
+      // note that copying here is safe because the entire method is synchronized
       Cluster beforeUpdate = copyCluster(_clusterCache);
 
       // Cruise Control always fetch metadata for all the topics.
-
-      //TODO: Cleanup exception handling
-      //TODO: Do I need to block here?
-      //TODO: I'm blocking with same timeout multiple times
+      // We are using a timer here due to multiple AdminClient calls that all "count" toward same
+      // timeout
+      // We use AdminClient timeout options and not `future.get(timeout)` because the AdminClient
+      // timeouts are often enforced in the brokers, which is clearly better.
       try {
-
-        Set<String> topics = _adminClient.listTopics().names().get(timeout, TimeUnit.MILLISECONDS);
-        Collection<Node> nodes = _adminClient.describeCluster().nodes().get(timeout,
-                TimeUnit.MILLISECONDS);
+        Timer timer = _time.timer(timeout);
+        ListTopicsOptions listTopicsOptions =
+                new ListTopicsOptions().timeoutMs(calcTimeoutMsRemainingAsInt(timer.remainingMs()));
+        Set<String> topics =
+                _adminClient.listTopics(listTopicsOptions).names().get();
+        timer.update();
+        DescribeClusterOptions describeClusterOptions =
+                new DescribeClusterOptions().timeoutMs(calcTimeoutMsRemainingAsInt(timer.remainingMs()));
+        Collection<Node> nodes = _adminClient.describeCluster(describeClusterOptions).nodes().get();
+        timer.update();
+        DescribeTopicsOptions describeTopicsOptions =
+                new DescribeTopicsOptions().timeoutMs(calcTimeoutMsRemainingAsInt(timer.remainingMs()));
         Map<String, TopicDescription> describeTopicResult =
-                _adminClient.describeTopics(topics).all().get(timeout, TimeUnit.MILLISECONDS);
+                _adminClient.describeTopics(topics, describeTopicsOptions).all().get();
         _clusterCache = topicDescriptionsToCluster(nodes, describeTopicResult);
-
-        if (LOG.isDebugEnabled()) {
+        timer.update();
+        if (timer.isExpired()) {
+          LOG.warn("Failed to update metadata in {}ms. Using old metadata with last successful update {}.",
+                  timeout, _lastUpdateTime);
+        } else if (LOG.isDebugEnabled()) {
           LOG.debug("Updated metadata {}", _clusterCache);
         }
       } catch (ExecutionException e) {
-        e.printStackTrace();
-      } catch (TimeoutException e) {
-        LOG.warn("Failed to update metadata in {}ms. Using old metadata with last successful update {}.",
-                timeout, _lastUpdateTime);
+        LOG.error("Failed to update metadata. Using old metadata with last successful update {}.",
+                _lastUpdateTime, e);
       } catch (InterruptedException e) {
-        e.printStackTrace();
+        LOG.info("Updating cluster metadata was interrupted.");
       }
 
       if (MonitorUtils.metadataChanged(beforeUpdate, _clusterCache)) {
@@ -168,6 +179,15 @@ public class MetadataClient {
     return new Cluster("cached cluster metadata", nodes, partitionInfos, Collections.emptySet(),
             Collections.emptySet());
 
+  }
+
+  private int calcTimeoutMsRemainingAsInt(long deltaMs) {
+    if (deltaMs > Integer.MAX_VALUE) {
+      deltaMs = Integer.MAX_VALUE;
+    } else if (deltaMs < Integer.MIN_VALUE) {
+      deltaMs = Integer.MIN_VALUE;
+    }
+    return (int) deltaMs;
   }
 }
 
